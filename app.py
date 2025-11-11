@@ -1,3 +1,5 @@
+#11112025 1:28pm
+
 from flask import Flask, request, Response, render_template
 import io
 import csv
@@ -27,18 +29,36 @@ def upload():
 
     pdf_bytes = pdf_file.read()
 
+    # Define helper to check valid JSON response from processor
+    def check_response(json_data, proc_name):
+        if json_data is None:
+            return False, f"Failed to process document with {proc_name} processor."
+        return True, None
+
     if processor_name == 'capone':
         response_json = capone_processor.process_pdf(pdf_bytes)
+        valid, error_message = check_response(response_json, 'CapOne')
+        if not valid:
+            return error_message, 500
         csv_data = capone_processor.convert_to_csv(response_json)
-        return Response(csv_data, mimetype='text/csv', headers={"Content-Disposition": "attachment;filename=capone_transactions.csv"})
+        return Response(csv_data, mimetype='text/csv',
+                        headers={"Content-Disposition": "attachment;filename=capone_transactions.csv"})
 
     elif processor_name == 'chase7772':
         response_json = chase7772_processor.process_pdf(pdf_bytes)
+        valid, error_message = check_response(response_json, 'Chase7772')
+        if not valid:
+            return error_message, 500
         csv_data = chase7772_processor.convert_to_csv(response_json)
-        return Response(csv_data, mimetype='text/csv', headers={"Content-Disposition": "attachment;filename=chase7772_transactions.csv"})
+        return Response(csv_data, mimetype='text/csv',
+                        headers={"Content-Disposition": "attachment;filename=chase7772_transactions.csv"})
 
     elif processor_name == 'tcb':
-        response_json = tcb_processor.process_pdf(pdf_bytes)  # Implement Google Document AI call forwarding in your tcb_processor file
+        response_json = tcb_processor.process_pdf(pdf_bytes)
+        valid, error_message = check_response(response_json, 'TCB')
+        if not valid:
+            return error_message, 500
+
         debits, credits, unmapped = tcb_processor.process_tcb_json(response_json, journal_start, deposit_start)
 
         # Generate zipped MultiLedger CSVs in memory
@@ -66,6 +86,7 @@ def upload():
         output_zip.seek(0)
         return Response(output_zip.getvalue(), mimetype='application/zip',
                         headers={"Content-Disposition": "attachment;filename=multiledger_tcb_export.zip"})
+
     else:
         return f"Processor '{processor_name}' not supported", 400
 

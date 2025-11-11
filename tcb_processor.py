@@ -1,7 +1,9 @@
 import json
 import csv
 
-# Extraction function adapted from our previous work
+from google.cloud import documentai_v1 as documentai
+
+# Extraction function adapted from your previous work
 def extract_transactions_from_entities(entities):
     transactions = []
     for entity in entities:
@@ -33,10 +35,15 @@ def match_mapping(description, mapping_dict):
     return ("UNMAPPED", "")
 
 def process_tcb_json(json_data, journal_start, deposit_start):
+    if not json_data:
+        # Defensive: return empty lists if JSON is None or invalid
+        return [], [], []
+
+    # Safely get entities list or empty
     entities = json_data.get("entities", [])
     transactions = extract_transactions_from_entities(entities)
-    debits, credits, unmapped = [], [], []
 
+    debits, credits, unmapped = [], [], []
     journal_num = int(journal_start)
     deposit_num = int(deposit_start)
 
@@ -66,22 +73,39 @@ def save_csv(filename, rows, header):
     print(f"Wrote {len(rows)} entries to {filename}")
 
 def process_pdf(pdf_bytes):
-    # Add your Google Document AI call here
-    # For example:
-    # from google.cloud import documentai_v1 as documentai
-    # Return document ai json response converted to dict
-    pass
+    try:
+        client = documentai.DocumentProcessorServiceClient()
+
+        project_id = "YOUR_PROJECT_ID"  # Replace with your GCP project ID
+        location = "YOUR_PROCESSOR_LOCATION"  # e.g., "us"
+        processor_id = "YOUR_PROCESSOR_ID"  # Your Document AI processor ID
+
+        name = client.processor_path(project_id, location, processor_id)
+
+        request = documentai.ProcessRequest(
+            name=name,
+            raw_document=documentai.RawDocument(
+                content=pdf_bytes,
+                mime_type="application/pdf"
+            )
+        )
+
+        result = client.process_document(request=request)
+        # The returned result is of proto type; convert to JSON dict
+        document_json = json.loads(result.document.to_json())
+        return document_json
+    except Exception as e:
+        # Log or handle exception as needed
+        print(f"Error processing document in Document AI: {e}")
+        return None
 
 if __name__ == "__main__":
-    # Example usage with JSON file and user input simulation
+    # Example local test with a saved JSON response
     with open("document_ai_response.json", "r", encoding="utf-8") as f:
         data = json.load(f)
-
     journal_start = input("Enter journal start number: ")
     deposit_start = input("Enter deposit start number: ")
-
     debits, credits, unmapped = process_tcb_json(data, journal_start, deposit_start)
-
     save_csv("tcb_debits.csv", debits, ["Journal#", "Date", "Short Desc", "Full Desc", "Amount", "Account#"])
     save_csv("tcb_credits.csv", credits, ["Deposit#", "Date", "Short Desc", "Full Desc", "Amount", "Account#"])
     if unmapped:
