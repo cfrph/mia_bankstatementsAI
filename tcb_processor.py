@@ -114,3 +114,18 @@ def process_tcb_json(json_data, journal_start, deposit_start):
 
     for date, description, amount in transactions:
         if amount < 0:
+            short_desc, acct = match_mapping(description, debit_account_map)
+            row = [journal_num, date, short_desc, description, amount, acct]
+            debits.append(row)
+            journal_num += 1
+            if short_desc == "UNMAPPED":
+                unmapped.append(row)
+        else:
+            short_desc, acct = match_mapping(description, credit_account_map)
+            row = [deposit_num, date, short_desc, description, amount, acct]
+            credits.append(row)
+            deposit_num += 1
+            if short_desc == "UNMAPPED":
+                unmapped.append(row)
+
+    return debits, credits, unmapped
