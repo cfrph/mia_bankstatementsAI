@@ -3,11 +3,12 @@ import json
 import csv
 from google.cloud import documentai_v1 as documentai
 from google.api_core.client_options import ClientOptions
+from google.protobuf.json_format import MessageToDict
 
 # --- Cloud and Processor Config ---
-GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "linear-poet-477701-q6")
-GCP_PROCESSOR_ID = os.environ.get("GCP_PROCESSOR_ID", "6df7b78a3654d182")
-GCP_LOCATION = os.environ.get("GCP_LOCATION", "us")
+GCP_PROJECT_ID = "linear-poet-477701-q6"
+GCP_PROCESSOR_ID = "6df7b78a3654d182"
+GCP_LOCATION = "us"
 
 # --- Account Mappings ---
 credit_account_map = {
@@ -69,9 +70,8 @@ def process_pdf(pdf_bytes):
         )
 
         result = client.process_document(request=request)
-        document_json = json.loads(result.document.to_json())
-
-        return document_json
+        document_dict = MessageToDict(result.document._pb)
+        return document_dict
     except Exception as e:
         print(f"Error processing document with Document AI: {e}")
         return None
@@ -114,18 +114,3 @@ def process_tcb_json(json_data, journal_start, deposit_start):
 
     for date, description, amount in transactions:
         if amount < 0:
-            short_desc, acct = match_mapping(description, debit_account_map)
-            row = [journal_num, date, short_desc, description, amount, acct]
-            debits.append(row)
-            journal_num += 1
-            if short_desc == "UNMAPPED":
-                unmapped.append(row)
-        else:
-            short_desc, acct = match_mapping(description, credit_account_map)
-            row = [deposit_num, date, short_desc, description, amount, acct]
-            credits.append(row)
-            deposit_num += 1
-            if short_desc == "UNMAPPED":
-                unmapped.append(row)
-
-    return debits, credits, unmapped
