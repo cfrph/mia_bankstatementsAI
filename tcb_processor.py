@@ -1,112 +1,170 @@
-import json
-import csv
-
+import pandas as pd
+import os
+from datetime import datetime
 from google.cloud import documentai_v1 as documentai
+from google.api_core.client_options import ClientOptions
 
-# Extraction function adapted from your previous work
-def extract_transactions_from_entities(entities):
+# --- Cloud and Processor Config ---
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "linear-poet-477701-q6")
+GCP_PROCESSOR_ID = os.environ.get("GCP_PROCESSOR_ID", "6df7b78a3654d182")
+GCP_LOCATION = os.environ.get("GCP_LOCATION", "us")
+
+# --- Account Mappings ---
+credit_account_map = {
+    "MERCHANT BANKCD DEPOSIT ACH ENTRY MEMO POSTED TODAY": "DEP MERCH BANK CCD MAIN",
+    "SYNCHRONY BANK MTOT DEP ACH ENTRY MEMO POSTED TODAY": "SYNCHRONY BANK CCD",
+    "DEPOSIT MERCHANT BANKCD CCD": "DEP MERCH BANK CCD MAIN",
+    "REGULAR DEPOSIT": "REGULAR DEPOSIT",
+    "CIGNA": "FAA - CIGNA CCD",
+    "EYEMED VISION CCD": "EYEMED VISION CCD",
+    "ESSILOR": "ESSILOR SAFETY CCD",
+    "EYETOPIA": "REIMB EYETOPIA CCD",
+    "FAA ADMIN CCD": "FAA ADMIN CCD",
+    "MTOT DEP SYNCHRONY BANK CCD": "SYNCHRONY BANK CCD",
+    "HCCLAIMPMT SUPERIOR VISION CCD": "SUPERIOR VISION CCD",
+    "HCCLAIMPMT UHC SPECTERA VSN CCD": "UHC SPECTERA VISION",
+    "DAVIS VISION CCD": "DAVIS VISION CCD",
+    "1010877933 FAA - AETNA CCD": "FAA - AETNA CCD",
+    "FSL ADMIN FAA CCD": "FSL ADMIN FAA CCD",
+}
+debit_account_map = {
+    "USATAXPYMT IRS CCD": "2060",
+    "USA TAX PYMT IRS CCD": "2060",
+    "USA TAX PYMT IRS": "2060",
+    "AUTOPAYBUS CHASE CREDIT CRD PPD": "2130",
+    "CRCARDPMT CAPITAL ONE CCD": "2130",
+    "CAPITAL ONE VISA PMT": "2130",
+    "CHASE VISA PMT 7772": "2135",
+    "CHASE VISA PMT 3506": "2136",
+    "DISCOUNT MERCHANT BANKCD CCD": "6460",
+    "DISCT MERCH BANK CCD": "6460",
+    "MERCH BANK DISCT ACH": "6460",
+    "FEE MERCHANT BANKCD CCD": "6460",
+    "FEE MERCH BANK CCD": "6460",
+    "MERCH BANK FEE ACH": "6460",
+    "INTERCHNG MERCHANT BANKCD CCD": "6460",
+    "INTERCHNG MERCH BANK CCD": "6460",
+    "INTERCHNG MERCH BANK": "6460",
+    "MERCH BANK INTERCHNG ACH": "6460",
+    "WEB PAY PECAA BUYING GRP": "5000",
+    "PECAA BUYING GRP": "5000",
+    "ADT ALARM": "7475",
+    "EVERON ALARM": "7475",
+    "IPAY BILL PAY": "6200",
+    "MBFS.COM MERCEDES LEASE": "7260",
+    "TX WORKFORCE COMM": "2070",
+}
+
+def extract_bank_statement_entities(pdf_path):
+    client_options = ClientOptions(api_endpoint=f"{GCP_LOCATION}-documentai.googleapis.com")
+    client = documentai.DocumentProcessorServiceClient(client_options=client_options)
+    name = client.processor_path(GCP_PROJECT_ID, GCP_LOCATION, GCP_PROCESSOR_ID)
+
+    with open(pdf_path, "rb") as f:
+        pdf_bytes = f.read()
+
+    request = documentai.ProcessRequest(
+        name=name,
+        raw_document=documentai.RawDocument(content=pdf_bytes, mime_type="application/pdf")
+    )
+    result = client.process_document(request=request)
+    document = result.document
+
     transactions = []
-    for entity in entities:
-        if entity.get("type_") == "table_item":
-            props = {p["type_"]: p.get("mention_text", "") for p in entity.get("properties", [])}
-            date = props.get("table_item/transaction_withdrawal_date") or props.get("table_item/transaction_deposit_date", "")
-            description = props.get("table_item/transaction_withdrawal_description") or props.get("table_item/transaction_deposit_description", "")
-            amount = props.get("table_item/transaction_withdrawal") or props.get("table_item/transaction_deposit", "")
-            if date and description and amount:
-                amt_clean = amount.replace('$', '').replace(',', '').strip()
-                try:
-                    amt_val = float(amt_clean)
-                    # Withdrawals marked negative
-                    if props.get("table_item/transaction_withdrawal") is not None:
-                        amt_val = -abs(amt_val)
-                    transactions.append([date, description, amt_val])
-                except ValueError:
-                    continue
+    for entity in document.entities:
+        if entity.type_ == "transaction":
+            txn = {"date": "", "description": "", "amount": "", "type": ""}
+            for prop in entity.properties:
+                if hasattr(prop, 'type_') and hasattr(prop, 'mention_text'):
+                    if prop.type_ == "date":
+                        txn["date"] = prop.mention_text
+                    elif prop.type_ == "description":
+                        txn["description"] = prop.mention_text
+                    elif prop.type_ == "amount":
+                        txn["amount"] = prop.mention_text
+                    elif prop.type_ == "transaction_type":
+                        txn["type"] = prop.mention_text
+            transactions.append(txn)
+    print("[DEBUG] Extracted transactions count:", len(transactions))
+    print("[DEBUG] Sample transactions:", transactions[:3])
     return transactions
 
-# Placeholder for your mapping dicts - add mappings later as needed
-debit_mapping = {}
-credit_mapping = {}
+def process_tcb_statement(pdf_path, gj_startnum, dp_startnum, output_folder, timestamp=None):
+    if not timestamp:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-def match_mapping(description, mapping_dict):
-    for k in mapping_dict:
-        if k.lower() in description.lower():
-            return mapping_dict[k]
-    return ("UNMAPPED", "")
+    txns = extract_bank_statement_entities(pdf_path)
+    df = pd.DataFrame(txns)
 
-def process_tcb_json(json_data, journal_start, deposit_start):
-    if not json_data:
-        # Defensive: return empty lists if JSON is None or invalid
-        return [], [], []
+    for col in ("date", "amount", "description", "type"):
+        if col not in df.columns:
+            df[col] = ""
 
-    # Safely get entities list or empty
-    entities = json_data.get("entities", [])
-    transactions = extract_transactions_from_entities(entities)
+    df["DATE"] = pd.to_datetime(df["date"], errors="coerce")
+    df["AMOUNT"] = pd.to_numeric(df["amount"].astype(str).str.replace(r'[^\d\-.]', '', regex=True), errors="coerce")
+    df["DESCRIPTION"] = df["description"]
+    df["TYPE"] = df["type"].str.lower()
 
-    debits, credits, unmapped = [], [], []
-    journal_num = int(journal_start)
-    deposit_num = int(deposit_start)
+    df_debits = df[df["TYPE"] == "debit"].copy()
+    df_credits = df[df["TYPE"] == "credit"].copy()
 
-    for date, description, amount in transactions:
-        if amount < 0:
-            short_desc, acct = match_mapping(description, debit_mapping)
-            row = [journal_num, date, short_desc, description, amount, acct]
-            debits.append(row)
-            journal_num += 1
-            if short_desc == "UNMAPPED":
-                unmapped.append(row)
-        else:
-            short_desc, acct = match_mapping(description, credit_mapping)
-            row = [deposit_num, date, short_desc, description, amount, acct]
-            credits.append(row)
-            deposit_num += 1
-            if short_desc == "UNMAPPED":
-                unmapped.append(row)
+    print(f"[DEBUG] Debit rows count: {len(df_debits)}")
+    print(f"[DEBUG] Credit rows count: {len(df_credits)}")
 
-    return debits, credits, unmapped
+    df_debits.sort_values("DATE", inplace=True)
+    df_debits["Account"] = df_debits["DESCRIPTION"].str.upper().apply(
+        lambda desc: next((v for k, v in debit_account_map.items() if k in desc), "7800")
+    )
+    df_debits["ShortDescription"] = df_debits["DESCRIPTION"]
+    df_debits["CounterAccount"] = "1100"
+    df_debits["Document"] = [f"GJ#{i}" for i in range(gj_startnum, gj_startnum + len(df_debits))]
 
-def save_csv(filename, rows, header):
-    with open(filename, "w", newline='', encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(rows)
-    print(f"Wrote {len(rows)} entries to {filename}")
+    debit_rows = [
+        [
+            row["DATE"].strftime("%m/%d/%y") if pd.notnull(row["DATE"]) else "",
+            row["Document"], row["Account"], row["ShortDescription"], abs(row["AMOUNT"]),
+            row["CounterAccount"], row["ShortDescription"], -abs(row["AMOUNT"])
+        ] for _, row in df_debits.iterrows()
+    ]
+    df_export_debits = pd.DataFrame(debit_rows, columns=[
+        "Date", "Document", "Account", "Description", "Amount",
+        "CounterAccount", "Description2", "AmountNeg"
+    ])
+    debit_csv = os.path.join(output_folder, f"TCB_debits_{timestamp}.csv")
+    df_export_debits.to_csv(debit_csv, index=False, header=False)
 
-def process_pdf(pdf_bytes):
-    try:
-        client = documentai.DocumentProcessorServiceClient()
+    df_credits.sort_values("DATE", inplace=True)
+    df_credits["Account"] = "4000"
+    df_credits["CounterAccount"] = "1100"
+    df_credits["ShortDescription"] = df_credits["DESCRIPTION"].str.upper().apply(
+        lambda desc: next((v for k, v in credit_account_map.items() if k in desc), desc)
+    )
+    df_credits["Document"] = [f"DP#{i}" for i in range(dp_startnum, dp_startnum + len(df_credits))]
 
-        project_id = "YOUR_PROJECT_ID"  # Replace with your GCP project ID
-        location = "YOUR_PROCESSOR_LOCATION"  # e.g., "us"
-        processor_id = "YOUR_PROCESSOR_ID"  # Your Document AI processor ID
+    credit_rows = [
+        [
+            row["DATE"].strftime("%m/%d/%y") if pd.notnull(row["DATE"]) else "",
+            row["Document"], row["CounterAccount"], row["ShortDescription"], row["AMOUNT"],
+            row["Account"], row["ShortDescription"], -abs(row["AMOUNT"])
+        ] for _, row in df_credits.iterrows()
+    ]
+    df_export_credits = pd.DataFrame(credit_rows, columns=[
+        "Date", "Document", "Account", "Description", "Amount",
+        "CounterAccount", "Description2", "AmountNeg"
+    ])
+    credit_csv = os.path.join(output_folder, f"TCB_credits_{timestamp}.csv")
+    df_export_credits.to_csv(credit_csv, index=False, header=False)
 
-        name = client.processor_path(project_id, location, processor_id)
+    unmapped_rows = []
+    for _, row in df_debits.iterrows():
+        if row["Account"] == "7800":
+            date_str = row["DATE"].strftime("%m/%d/%y") if pd.notnull(row["DATE"]) else ""
+            unmapped_rows.append([date_str, row["DESCRIPTION"], abs(row["AMOUNT"]), "7800"])
+    df_unmapped = pd.DataFrame(unmapped_rows, columns=["Date", "Description", "Amount", "Account"])
 
-        request = documentai.ProcessRequest(
-            name=name,
-            raw_document=documentai.RawDocument(
-                content=pdf_bytes,
-                mime_type="application/pdf"
-            )
-        )
+    unmapped_csv = None
+    if not df_unmapped.empty:
+        unmapped_csv = os.path.join(output_folder, f"TCB_unmapped_{timestamp}.csv")
+        df_unmapped.to_csv(unmapped_csv, index=False)
 
-        result = client.process_document(request=request)
-        # The returned result is of proto type; convert to JSON dict
-        document_json = json.loads(result.document.to_json())
-        return document_json
-    except Exception as e:
-        # Log or handle exception as needed
-        print(f"Error processing document in Document AI: {e}")
-        return None
-
-if __name__ == "__main__":
-    # Example local test with a saved JSON response
-    with open("document_ai_response.json", "r", encoding="utf-8") as f:
-        data = json.load(f)
-    journal_start = input("Enter journal start number: ")
-    deposit_start = input("Enter deposit start number: ")
-    debits, credits, unmapped = process_tcb_json(data, journal_start, deposit_start)
-    save_csv("tcb_debits.csv", debits, ["Journal#", "Date", "Short Desc", "Full Desc", "Amount", "Account#"])
-    save_csv("tcb_credits.csv", credits, ["Deposit#", "Date", "Short Desc", "Full Desc", "Amount", "Account#"])
-    if unmapped:
-        save_csv("tcb_unmapped.csv", unmapped, ["Entry#", "Date", "Short Desc", "Full Desc", "Amount", "Account#"])
+    return credit_csv, debit_csv, unmapped_csv if unmapped_csv else None
