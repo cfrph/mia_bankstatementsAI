@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+    <title>Bank Statement Upload</title>
+</head>
+<body>
+    <h2>Upload Bank Statement</h2>
+    <form action="/upload" method="post" enctype="multipart/form-data">
+        <label>PDF File:</label>
+        <input type="file" name="pdf" required><br>
+        <label>Journal Start Number:</label>
+        <input type="text" name="journal_start" value="1000"><br>
+        <label>Deposit Start Number:</label>
+        <input type="text" name="deposit_start" value="2000"><br>
+        <label>Processor:</label>
+        <select name="processor">
+            <option value="capone">Capone</option>
+            <option value="chase7772">Chase7772</option>
+            <option value="tcb">TCB</option>
+        </select><br>
+        <button type="submit">Upload</button>
+    </form>
+</body>
+</html>
